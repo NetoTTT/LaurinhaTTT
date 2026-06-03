@@ -1,5 +1,5 @@
 import { readMemory, compactMemory, needsCompaction } from './engine';
-import { compactMemoryWithGemini } from '../ai/gemini';
+import { compactMemoryWithOpenCodeGo } from '../ai/compact';
 
 // Chamado pelo backend (handler, scheduler) — nunca pelo modelo
 export async function compactViaBackend(platform: string, platformId: string): Promise<boolean> {
@@ -8,8 +8,8 @@ export async function compactViaBackend(platform: string, platformId: string): P
   const memory = await readMemory(platform, platformId);
   if (!memory) return false;
 
-  console.log(`[memory] triggering Gemini compaction for ${platformId}...`);
-  const compacted = await compactMemoryWithGemini(memory.raw);
+  console.log(`[memory] triggering OpenCodeGo compaction for ${platformId}...`);
+  const compacted = await compactMemoryWithOpenCodeGo(memory.raw);
   await compactMemory(platform, platformId, compacted);
   return true;
 }

@@ -2,20 +2,35 @@ import Redis from 'ioredis';
 import { BUS_TOPICS, type PlatformMessage, type PlatformResponse } from '@laurinha/shared-types';
 import { config } from '../config';
 import { routeMessage } from '../router/command.router';
+import { initMessageTracker, trackAIMessage } from '../ai/message-tracker';
 
 let publisher: Redis;
 let subscriber: Redis;
+let tracker: Redis;
 
 export function createRedisClients(): void {
   publisher = new Redis(config.redisUrl);
   subscriber = new Redis(config.redisUrl);
+  tracker = new Redis(config.redisUrl);
 
   publisher.on('error', (err) => console.error('[redis:pub]', err.message));
   subscriber.on('error', (err) => console.error('[redis:sub]', err.message));
+  tracker.on('error', (err) => console.error('[redis:tracker]', err.message));
+
+  initMessageTracker(tracker);
 }
 
 export async function publishOutbound(response: PlatformResponse): Promise<void> {
   await publisher.publish(BUS_TOPICS.MESSAGE_OUTBOUND, JSON.stringify(response));
+
+  // Rastreia a mensagem da IA para permitir auto-reply sem prefixo
+  // Será gerado um ID único pela plataforma (whatsapp-adapter gera após enviar)
+  // Por enquanto, acompanhamos via replyTo se disponível
+  if (response.replyTo) {
+    // A mensagem será enviada em resposta a replyTo, então será um reply
+    // O ID será gerado pela plataforma
+    console.log(`[tracker] scheduled tracking for reply to ${response.replyTo}`);
+  }
 }
 
 export function subscribeInbound(): void {
@@ -49,4 +64,5 @@ export function subscribeInbound(): void {
 export function closeRedis(): void {
   publisher.quit();
   subscriber.quit();
+  tracker.quit();
 }

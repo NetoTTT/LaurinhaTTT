@@ -3,7 +3,7 @@ import { existsSync } from 'fs';
 import { join } from 'path';
 import { config } from '../config';
 
-const MAX_FILE_CHARS = 3500;
+const MAX_FILE_CHARS = 15000;
 const MAX_PENDING_NOTES = 8;
 
 // ─── Tipos ───────────────────────────────────────────────────────────────────

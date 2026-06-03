@@ -2,16 +2,22 @@ import Redis from 'ioredis';
 import { BUS_TOPICS, type PlatformMessage, type PlatformResponse } from '@laurinha/shared-types';
 import { config } from '../config';
 import { sendResponse, setInboundHandler } from '../whatsapp/client';
+import { initAIMessageTracker } from '../tracker/ai-messages';
 
 let publisher: Redis;
 let subscriber: Redis;
+let tracker: Redis;
 
 export function createRedisClients(): void {
   publisher = new Redis(config.redisUrl);
   subscriber = new Redis(config.redisUrl);
+  tracker = new Redis(config.redisUrl);
 
   publisher.on('error', (err) => console.error('[redis:pub]', err.message));
   subscriber.on('error', (err) => console.error('[redis:sub]', err.message));
+  tracker.on('error', (err) => console.error('[redis:tracker]', err.message));
+
+  initAIMessageTracker(tracker);
 
   // Toda mensagem recebida do WhatsApp é publicada no barramento
   setInboundHandler((message: PlatformMessage) => {
@@ -51,4 +57,5 @@ export function subscribeOutbound(): void {
 export function closeRedis(): void {
   publisher.quit();
   subscriber.quit();
+  tracker.quit();
 }

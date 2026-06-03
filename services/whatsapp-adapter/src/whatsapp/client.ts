@@ -2,9 +2,12 @@ import pkg from 'whatsapp-web.js';
 const { Client, LocalAuth, MessageMedia } = pkg;
 import type { Message } from 'whatsapp-web.js';
 import QRCode from 'qrcode';
-import { rmSync, existsSync } from 'fs';
+import qrcode from 'qrcode-terminal';
+import { rmSync, existsSync, writeFileSync } from 'fs';
+import { join } from 'path';
 import type { PlatformMessage, PlatformResponse, ContentType } from '@laurinha/shared-types';
 import { config } from '../config';
+import { trackAIMessageSent } from '../tracker/ai-messages';
 
 export type ConnectionState = 'initializing' | 'qr' | 'authenticated' | 'ready' | 'disconnected';
 
@@ -186,7 +189,11 @@ export async function sendResponse(response: PlatformResponse): Promise<void> {
   const quoteOpts = replyTo ? { quotedMessageId: replyTo } : {};
 
   if (content.type === 'text') {
-    await client.sendMessage(chatId, content.text ?? '', quoteOpts);
+    const msg = await client.sendMessage(chatId, content.text ?? '', quoteOpts);
+    // Rastreia mensagem da IA para auto-reply sem prefixo
+    if (msg?.id?._serialized) {
+      await trackAIMessageSent(msg.id._serialized, chatId, 'laurinha');
+    }
     return;
   }
 
@@ -196,11 +203,15 @@ export async function sendResponse(response: PlatformResponse): Promise<void> {
       content.media.base64,
       content.media.filename,
     );
-    await client.sendMessage(chatId, media, {
+    const msg = await client.sendMessage(chatId, media, {
       ...quoteOpts,
       caption: content.media.caption ?? content.text,
       sendMediaAsSticker: content.type === 'sticker',
     });
+    // Rastreia mensagem da IA
+    if (msg?.id?._serialized) {
+      await trackAIMessageSent(msg.id._serialized, chatId, 'laurinha');
+    }
   }
 }
 
@@ -243,7 +254,18 @@ export async function initWhatsApp(): Promise<void> {
   client.on('qr', async (qr) => {
     status.state = 'qr';
     status.qrBase64 = await QRCode.toDataURL(qr, { margin: 1, width: 320 });
-    console.log('[wa] QR code generated — scan via dashboard');
+
+    console.log('\n' + '='.repeat(50));
+    console.log('[wa] 📱 QR CODE GENERATED — SCAN WITH WHATSAPP');
+    console.log('='.repeat(50));
+    qrcode.generate(qr, { small: true });
+    console.log('='.repeat(50));
+    console.log('[wa] Instructions:');
+    console.log('  1. Open WhatsApp on your phone');
+    console.log('  2. Go to Settings → Linked Devices');
+    console.log('  3. Tap "Link a Device"');
+    console.log('  4. Point your phone camera at the QR code above');
+    console.log('='.repeat(50) + '\n');
   });
 
   client.on('authenticated', () => {
