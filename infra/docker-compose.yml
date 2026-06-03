@@ -1,0 +1,93 @@
+services:
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    command: redis-server --save 60 1
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-laurinha}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  whatsapp-adapter:
+    build:
+      context: ..
+      dockerfile: services/whatsapp-adapter/Dockerfile
+    env_file:
+      - ../.env
+    environment:
+      REDIS_URL: redis://redis:6379
+      WA_SESSION_PATH: /app/wa-session
+    volumes:
+      # Persiste a sessão do WhatsApp entre reinícios (não precisa reescanear QR)
+      - wa_session:/app/wa-session
+    ports:
+      - '3322:3322'
+    restart: unless-stopped
+    # whatsapp-web.js sobe um Chromium — precisa de mais memória compartilhada
+    shm_size: '512mb'
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  core-backend:
+    build:
+      context: ..
+      dockerfile: services/core-backend/Dockerfile
+    env_file:
+      - ../.env
+    environment:
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/laurinha
+    ports:
+      - '3321:3321'
+    volumes:
+      # Permite que core-backend execute docker logs --follow para o endpoint de SSE
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  dashboard:
+    build:
+      context: ..
+      dockerfile: services/dashboard/Dockerfile
+    env_file:
+      - ../.env
+    environment:
+      PORT: "3323"
+      REDIS_URL: redis://redis:6379
+      CORE_BACKEND_URL: http://core-backend:3321
+      WA_ADAPTER_URL: http://whatsapp-adapter:3322
+    ports:
+      - '3323:3323'
+    restart: unless-stopped
+    depends_on:
+      - core-backend
+      - whatsapp-adapter
+      - redis
+
+volumes:
+  redis_data:
+  pg_data:
+  wa_session:

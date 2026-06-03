@@ -1,0 +1,19 @@
+{
+  "name": "laurinha-ttt",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "services/*"
+  ],
+  "scripts": {
+    "dev": "npm run build -w packages/shared-types && concurrently -n types,core,wa -c yellow,cyan,green \"npm run dev -w packages/shared-types\" \"npm run dev -w services/core-backend\" \"npm run dev -w services/whatsapp-adapter\"",
+    "build": "npm run build -w packages/shared-types && npm run build -w services/core-backend && npm run build -w services/whatsapp-adapter",
+    "infra:up": "docker compose -f infra/docker-compose.dev.yml up -d",
+    "infra:down": "docker compose -f infra/docker-compose.dev.yml down"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "typescript": "^5.5.4"
+  }
+}

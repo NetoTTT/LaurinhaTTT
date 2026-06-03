@@ -1,0 +1,18 @@
+{
+	"/": [
+		"src/routes/+page.server.ts"
+	],
+	"/api/logs/[service]": [
+		"src/routes/api/logs/[service]/+server.ts"
+	],
+	"/api/sse": [
+		"src/routes/api/sse/+server.ts"
+	],
+	"/commands": [
+		"src/routes/commands/+page.server.ts"
+	],
+	"/messages": [],
+	"/whatsapp": [
+		"src/routes/whatsapp/+page.server.ts"
+	]
+}
