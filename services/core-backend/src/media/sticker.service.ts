@@ -11,11 +11,12 @@ const STICKER_SIZE = 512;
 
 export async function imageToSticker(input: Buffer): Promise<Buffer> {
   return sharp(input)
+    .ensureAlpha()
     .resize(STICKER_SIZE, STICKER_SIZE, {
       fit: 'contain',
       background: { r: 0, g: 0, b: 0, alpha: 0 },
     })
-    .webp({ quality: 80 })
+    .webp({ quality: 80, alphaQuality: 100 })
     .toBuffer();
 }
 

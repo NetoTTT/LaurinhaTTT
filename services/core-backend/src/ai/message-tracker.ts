@@ -26,10 +26,14 @@ export async function trackAIMessage(
 }
 
 export async function isAIMessage(platform: string, messageId: string): Promise<boolean> {
-  if (!redis) return false;
+  if (!redis) {
+    console.log(`[ai-tracker] redis not initialized`);
+    return false;
+  }
 
   const key = `${AI_MESSAGE_PREFIX}${platform}:${messageId}`;
   const exists = await redis.exists(key);
+  console.log(`[ai-tracker] checking ${key}: exists=${exists === 1}`);
   return exists === 1;
 }
 

@@ -24,12 +24,14 @@ export async function publishOutbound(response: PlatformResponse): Promise<void>
   await publisher.publish(BUS_TOPICS.MESSAGE_OUTBOUND, JSON.stringify(response));
 
   // Rastreia a mensagem da IA para permitir auto-reply sem prefixo
-  // Será gerado um ID único pela plataforma (whatsapp-adapter gera após enviar)
-  // Por enquanto, acompanhamos via replyTo se disponível
   if (response.replyTo) {
-    // A mensagem será enviada em resposta a replyTo, então será um reply
-    // O ID será gerado pela plataforma
+    // Registra que a IA respondeu a essa mensagem para evitar loops
+    // Quando essa resposta voltar, será detectada como uma resposta recente da IA
     console.log(`[tracker] scheduled tracking for reply to ${response.replyTo}`);
+
+    // Importar aqui para evitar circular dependency
+    const { trackSentMessage } = await import('../router/command.router');
+    trackSentMessage(response.replyTo);
   }
 }
 

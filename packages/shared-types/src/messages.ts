@@ -24,6 +24,7 @@ export interface PlatformMessage {
     media?: MediaContent;
   };
   replyTo?: string;
+  mentionedIds?: string[];
   quotedMessage?: {
     id: string;
     type: ContentType;

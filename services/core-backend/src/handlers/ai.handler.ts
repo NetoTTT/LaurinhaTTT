@@ -1,8 +1,9 @@
 import type { PlatformMessage, PlatformResponse } from '@laurinha/shared-types';
-import { processWithAI } from '../ai/lmstudio';
+import { processWithAI, type AIAudioResponse } from '../ai/lmstudio';
 import { getConversationHistory, saveContextMessage } from '../db/context.repository';
 import { bufferToBase64 } from '../media/sticker.service';
 import { publishOutbound } from '../bus/redis';
+import { trackSentMessage } from '../router/command.router';
 
 function describeContent(msg: PlatformMessage): string {
   const { content } = msg;
@@ -30,11 +31,29 @@ export async function handleAIMessage(message: PlatformMessage): Promise<Platfor
     const historyWithoutCurrent = history.slice(0, -1);
 
     const result = await processWithAI(
-      { text: textForContext, userName, isGroup: isGroup ?? false, platform, userId },
+      { text: textForContext, userName, isGroup: isGroup ?? false, platform, userId, chatId },
       historyWithoutCurrent,
     );
 
     if (result.type === 'silent') return null;
+
+    if (result.type === 'audio') {
+      const audioResult = result as AIAudioResponse;
+      try {
+        await saveContextMessage(chatId, platform, 'assistant', '[enviou áudio]');
+        return {
+          chatId, platform, replyTo: id,
+          content: {
+            type: 'audio',
+            media: { mimetype: 'audio/ogg; codecs=opus', base64: audioResult.data.toString('base64') },
+          },
+        };
+      } catch (audioErr) {
+        console.error('[ai] audio send failed, falling back to text:', (audioErr as Error).message);
+        await saveContextMessage(chatId, platform, 'assistant', audioResult.text);
+        return { chatId, platform, replyTo: id, content: { type: 'text', text: audioResult.text } };
+      }
+    }
 
     if (result.type === 'sticker') {
       await saveContextMessage(chatId, platform, 'assistant', '[enviou uma figurinha]');
@@ -49,7 +68,7 @@ export async function handleAIMessage(message: PlatformMessage): Promise<Platfor
       // Envia texto primeiro, depois figurinha (fire-and-forget via Redis com pequeno delay)
       setTimeout(() => {
         publishOutbound({
-          chatId, platform,
+          chatId, platform, replyTo: id,
           content: { type: 'sticker', media: { mimetype: 'image/webp', base64: bufferToBase64(result.data) } },
         }).catch(console.error);
       }, 800);

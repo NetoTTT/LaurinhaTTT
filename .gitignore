@@ -62,9 +62,22 @@ temp/
 coverage/
 .nyc_output/
 
-# PM2
+# PM2 — ecosystem tem chaves de API reais, NUNCA versionar
+ecosystem.config.js
 ecosystem.config.js.dist
 ecosystem.config.js.bak
+
+# Conteúdo gerado pela IA no servidor (não vai pro repo)
+public/pages/
+projects/
+
+# Dados de usuário (memória, uploads)
+services/core-backend/data/
+
+# Arquivos de teste temporários
+test-*.mjs
+test-*.wav
+test-*.mp3
 
 # Redis/dump files
 *.rdb
