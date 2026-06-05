@@ -3,6 +3,7 @@ import {
   GatewayIntentBits,
   Partials,
   AttachmentBuilder,
+  ActivityType,
   Events,
   type Message,
   type TextChannel,
@@ -12,6 +13,38 @@ import {
 } from 'discord.js';
 import type { PlatformMessage, PlatformResponse } from '@laurinha/shared-types';
 import { config } from '../config';
+
+const STATUSES: Array<{ type: ActivityType; text: string }> = [
+  { type: ActivityType.Watching,   text: 'o grupo explodir sozinho' },
+  { type: ActivityType.Playing,    text: 'de inútil com estilo' },
+  { type: ActivityType.Listening,  text: 'drama alheio atentamente' },
+  { type: ActivityType.Playing,    text: 'de psicóloga sem formação' },
+  { type: ActivityType.Watching,   text: 'meme e não mandando pra ninguém' },
+  { type: ActivityType.Playing,    text: 'de fantasma no grupo' },
+  { type: ActivityType.Listening,  text: 'alguém desabafar no pv' },
+  { type: ActivityType.Watching,   text: 'vocês se autossabotarem' },
+  { type: ActivityType.Playing,    text: 'ignorar mensagem com maestria' },
+  { type: ActivityType.Listening,  text: 'confissão que não pedi pra ouvir' },
+  { type: ActivityType.Playing,    text: 'de IA mas tô quase virando humana' },
+  { type: ActivityType.Watching,   text: 'alguém apanhar e não intervindo' },
+  { type: ActivityType.Playing,    text: 'de sabe-tudo sem saber nada' },
+  { type: ActivityType.Listening,  text: 'silêncio de quem tá com raiva' },
+  { type: ActivityType.Watching,   text: 'o caos se instalar devagar' },
+  { type: ActivityType.Playing,    text: 'nas palavras sem compromisso' },
+  { type: ActivityType.Listening,  text: 'áudio de 14 minutos no 2x' },
+  { type: ActivityType.Watching,   text: 'todo mundo errar em câmera lenta' },
+  { type: ActivityType.Playing,    text: 'de desentendida estrategicamente' },
+  { type: ActivityType.Listening,  text: 'reclamação que não vai mudar nada' },
+];
+
+function setRandomStatus(): void {
+  const s = STATUSES[Math.floor(Math.random() * STATUSES.length)];
+  client.user?.setPresence({
+    activities: [{ name: s.text, type: s.type }],
+    status: 'online',
+  });
+  console.log(`[discord] status → ${ActivityType[s.type]} "${s.text}"`);
+}
 
 export const client = new Client({
   intents: [
@@ -58,10 +91,17 @@ async function shouldProcess(message: Message): Promise<boolean> {
 }
 
 function normalizeContent(message: Message): string {
-  // Remove a menção ao bot do início do texto
+  const hasMention = message.mentions.has(client.user!.id);
+  const isDM = !message.guild;
+
   let text = message.content
     .replace(new RegExp(`<@!?${client.user?.id}>`, 'g'), '')
     .trim();
+
+  // Menção direta ou DM sem prefixo → equivale a !!la no WhatsApp
+  if ((hasMention || isDM) && !text.startsWith('!!')) {
+    return `!!la ${text || '👋'}`;
+  }
 
   return text || '👋';
 }
@@ -187,7 +227,41 @@ export async function sendResponse(response: PlatformResponse): Promise<void> {
 
   if (content.media?.base64) {
     const buf = Buffer.from(content.media.base64, 'base64');
-    const ext = content.media.mimetype?.split('/')[1] ?? 'bin';
+
+    // Extrai só o tipo base (ignora "; codecs=opus" etc.)
+    const baseMime = (content.media.mimetype ?? '').split(';')[0].trim();
+    const ext = baseMime.split('/')[1] ?? 'bin';
+
+    // Áudio: tenta voice message → anexo normal → texto puro
+    if (content.type === 'audio') {
+      const attachment = new AttachmentBuilder(buf, { name: 'audio.ogg' })
+        .setDescription('mensagem de voz');
+
+      // 1ª tentativa: voice message nativa (bolinha de voz)
+      try {
+        await (channel as TextChannel).send({
+          files: [attachment],
+          flags: [4096], // MessageFlags.IsVoiceMessage = 4096
+        } as Parameters<TextChannel['send']>[0]);
+        return;
+      } catch { /* sem permissão para voice message */ }
+
+      // 2ª tentativa: anexo de áudio normal (toca inline)
+      try {
+        await (channel as TextChannel).send({ files: [attachment], ...replyOpts });
+        return;
+      } catch { /* sem permissão para anexar arquivos */ }
+
+      // 3ª tentativa: texto puro como fallback final
+      const fallbackText = content.text;
+      if (fallbackText) {
+        for (const chunk of splitMessage(`🎙️ ${fallbackText}`)) {
+          await (channel as TextChannel).send({ content: chunk, ...replyOpts });
+        }
+      }
+      return;
+    }
+
     const filename = content.media.filename ?? `arquivo.${ext}`;
     const attachment = new AttachmentBuilder(buf, { name: filename });
     const caption = content.text || content.media.caption;
@@ -203,6 +277,8 @@ export async function sendResponse(response: PlatformResponse): Promise<void> {
 export async function initDiscord(): Promise<void> {
   client.once(Events.ClientReady, (c) => {
     console.log(`[discord] conectado como ${c.user.tag} (${c.user.id})`);
+    setRandomStatus();
+    setInterval(setRandomStatus, 60 * 60 * 1000);
   });
 
   client.on(Events.MessageCreate, async (message) => {

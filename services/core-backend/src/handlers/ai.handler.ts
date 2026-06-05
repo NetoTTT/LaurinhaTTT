@@ -1,9 +1,10 @@
 import type { PlatformMessage, PlatformResponse } from '@laurinha/shared-types';
-import { processWithAI, type AIAudioResponse } from '../ai/lmstudio';
+import { processWithAI, type AIAudioResponse } from '../ai/ai-engine';
 import { getConversationHistory, saveContextMessage } from '../db/context.repository';
 import { bufferToBase64 } from '../media/sticker.service';
 import { publishOutbound } from '../bus/redis';
 import { trackSentMessage } from '../router/command.router';
+import { getStickerIdByData } from '../db/catalog.repository';
 
 function describeContent(msg: PlatformMessage): string {
   const { content } = msg;
@@ -21,7 +22,19 @@ export async function handleAIMessage(message: PlatformMessage): Promise<Platfor
   // Não processar mídia passiva sem texto
   if (['sticker', 'audio', 'document'].includes(content.type)) return null;
 
-  const textForContext = describeContent(message);
+  let textForContext = describeContent(message);
+
+  // Se é reply a uma figurinha, resolve o ID no banco e injeta no contexto
+  // → a IA verá "[respondendo à figurinha #42]" e saberá o ID sem o usuário digitar
+  if (message.quotedMessage?.type === 'sticker' && message.quotedMessage.media?.base64) {
+    try {
+      const stickerBuf = Buffer.from(message.quotedMessage.media.base64, 'base64');
+      const stickerId = await getStickerIdByData(stickerBuf);
+      if (stickerId) {
+        textForContext += ` [respondendo à figurinha #${stickerId}]`;
+      }
+    } catch { /* ignora falha de lookup */ }
+  }
 
   try {
     await saveContextMessage(chatId, platform, 'user', textForContext, userId, userName);
@@ -45,6 +58,7 @@ export async function handleAIMessage(message: PlatformMessage): Promise<Platfor
           chatId, platform, replyTo: id,
           content: {
             type: 'audio',
+            text: audioResult.text, // fallback caso o adapter não consiga enviar o arquivo
             media: { mimetype: 'audio/ogg; codecs=opus', base64: audioResult.data.toString('base64') },
           },
         };
@@ -56,7 +70,8 @@ export async function handleAIMessage(message: PlatformMessage): Promise<Platfor
     }
 
     if (result.type === 'sticker') {
-      await saveContextMessage(chatId, platform, 'assistant', '[enviou uma figurinha]');
+      const stickerLabel = result.mediaFileId > 0 ? `[enviou figurinha #${result.mediaFileId}]` : '[enviou uma figurinha]';
+      await saveContextMessage(chatId, platform, 'assistant', stickerLabel);
       return {
         chatId, platform, replyTo: id,
         content: { type: 'sticker', media: { mimetype: 'image/webp', base64: bufferToBase64(result.data) } },
@@ -64,7 +79,8 @@ export async function handleAIMessage(message: PlatformMessage): Promise<Platfor
     }
 
     if (result.type === 'text+sticker') {
-      await saveContextMessage(chatId, platform, 'assistant', result.text + ' [+ figurinha]');
+      const stickerLabel = result.mediaFileId > 0 ? `[enviou figurinha #${result.mediaFileId}]` : '[figurinha]';
+      await saveContextMessage(chatId, platform, 'assistant', result.text + ` [+ ${stickerLabel}]`);
       // Envia texto primeiro, depois figurinha (fire-and-forget via Redis com pequeno delay)
       setTimeout(() => {
         publishOutbound({

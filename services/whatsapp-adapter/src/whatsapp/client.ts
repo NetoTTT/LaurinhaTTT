@@ -122,7 +122,9 @@ async function normalizeMessage(msg: Message): Promise<PlatformMessage> {
   // Extrair informações da mensagem respondida
   let quotedMessage: PlatformMessage['quotedMessage'];
   console.log(`[wa] normalizeMessage: msg.hasQuotedMsg=${msg.hasQuotedMsg}`);
-  if (msg.hasQuotedMsg) {
+
+  // Tentar extrair via getQuotedMessage ou via contextInfo
+  if (msg.hasQuotedMsg || (msg as any).contextInfo?.quotedMessage) {
     console.log(`[wa] Tentando extrair quoted message...`);
     try {
       const quoted = await msg.getQuotedMessage();
@@ -157,9 +159,13 @@ async function normalizeMessage(msg: Message): Promise<PlatformMessage> {
     } catch (err) {
       console.error(`[wa] Erro ao extrair quoted message:`, (err as Error).message);
     }
+  } else {
+    console.log(`[wa] Nenhuma quoted message detectada`);
   }
 
   const resolvedText = type === 'text' ? await resolveMentions(msg, msg.body ?? '') : (msg.body || undefined);
+
+  const mentionedIds: string[] = (msg as any).mentionedIds ?? [];
 
   return {
     id: msg.id._serialized,
@@ -174,6 +180,7 @@ async function normalizeMessage(msg: Message): Promise<PlatformMessage> {
       text: type === 'text' ? resolvedText : msg.body || undefined,
       media,
     },
+    ...(mentionedIds.length && { mentionedIds }),
     ...(quotedMessage && { quotedMessage }),
     timestamp: msg.timestamp * 1000,
   };
@@ -190,9 +197,12 @@ export async function sendResponse(response: PlatformResponse): Promise<void> {
 
   if (content.type === 'text') {
     const msg = await client.sendMessage(chatId, content.text ?? '', quoteOpts);
-    // Rastreia mensagem da IA para auto-reply sem prefixo
-    if (msg?.id?._serialized) {
+
+    // Se está respondendo a uma mensagem, rastreia o ID da RESPOSTA enviada
+    // para que replies subsequentes sejam detectadas como replies a mensagens da IA
+    if (replyTo && msg?.id?._serialized) {
       await trackAIMessageSent(msg.id._serialized, chatId, 'laurinha');
+      console.log(`[ai-tracker] tracked sent response: ${msg.id._serialized} as reply to ${replyTo}`);
     }
     return;
   }
@@ -205,12 +215,15 @@ export async function sendResponse(response: PlatformResponse): Promise<void> {
     );
     const msg = await client.sendMessage(chatId, media, {
       ...quoteOpts,
-      caption: content.media.caption ?? content.text,
+      caption: content.type === 'audio' ? undefined : (content.media.caption ?? content.text),
       sendMediaAsSticker: content.type === 'sticker',
+      sendAudioAsVoice: content.type === 'audio',
     });
-    // Rastreia mensagem da IA
-    if (msg?.id?._serialized) {
+
+    // Se está respondendo a uma mensagem, rastreia o ID da RESPOSTA enviada
+    if (replyTo && msg?.id?._serialized) {
       await trackAIMessageSent(msg.id._serialized, chatId, 'laurinha');
+      console.log(`[ai-tracker] tracked sent response: ${msg.id._serialized} as reply to ${replyTo}`);
     }
   }
 }
@@ -295,7 +308,10 @@ export async function initWhatsApp(): Promise<void> {
   });
 
   client.on('message', async (msg) => {
-    if (msg.fromMe) return; // message_create handles owner messages
+    if (msg.fromMe) {
+      console.log(`[wa] ignoring own message: ${msg.body?.substring(0, 30)}`);
+      return; // message_create handles owner messages
+    }
     try {
       const normalized = await normalizeMessage(msg);
       onInboundMessage?.(normalized);
@@ -311,7 +327,12 @@ export async function initWhatsApp(): Promise<void> {
     if (!msg.fromMe) return; // Só processa mensagens do próprio número
 
     const text = msg.body?.trim() ?? '';
-    if (!text.startsWith('!')) return; // Só processa se começa com !
+
+    // Processar se começa com ! OU se é resposta a uma mensagem (quotedMessage)
+    const isCommand = text.startsWith('!');
+    const isReply = msg.hasQuotedMsg || (msg as any).contextInfo?.quotedMessage;
+
+    if (!isCommand && !isReply) return; // Só processa comandos ou respostas
 
     try {
       // DEBUG: Log do tipo e hasMedia
@@ -375,11 +396,13 @@ export async function initWhatsApp(): Promise<void> {
 
       const resolvedText = type === 'text' ? await resolveMentions(msg, text) : (text || undefined);
 
+      const ownerMentionedIds: string[] = (msg as any).mentionedIds ?? [];
+
       const message: PlatformMessage = {
         id: msg.id._serialized,
         platform: 'whatsapp',
         chatId,
-        userId: msg.from,
+        userId: client.info?.wid?._serialized ?? msg.from,
         userName: 'Owner',
         isGroup,
         groupId: isGroup ? chatId : undefined,
@@ -388,6 +411,7 @@ export async function initWhatsApp(): Promise<void> {
           text: type === 'text' ? resolvedText : text || undefined,
           media,
         },
+        ...(ownerMentionedIds.length && { mentionedIds: ownerMentionedIds }),
         ...(quotedMessage && { quotedMessage }),
         timestamp: msg.timestamp * 1000,
       };

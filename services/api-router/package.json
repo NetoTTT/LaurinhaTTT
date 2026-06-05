@@ -1,0 +1,6 @@
+{
+  "name": "api-router",
+  "version": "1.0.0",
+  "description": "Gateway dinâmico para projetos backend da Laura",
+  "main": "index.js"
+}

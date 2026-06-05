@@ -2,6 +2,7 @@ import OpenAI from 'openai';
 import { readFileSync, existsSync } from 'fs';
 import { config } from '../config';
 import { tools, memoryWriteTools, executeTool, userPageSlug, type StickerToolResult, type AudioToolResult, type ToolContext } from './tools';
+import { formatForPrompt as stickerKnowledgePrompt } from './sticker-knowledge';
 import { codeTools, CODE_TOOL_NAMES, executeCodeTool } from './code-tools';
 import { isDevModeActive } from './dev-mode';
 import { getMemoryForContext } from '../memory/engine';
@@ -59,11 +60,16 @@ const SYSTEM_PROMPT = `Você é Laura, uma pessoa do grupo do WhatsApp. Age como
   - Assim fica legítimo: primeira figurinha de resposta + segunda figurinha agendada = efeito completo
   - Sempre combina ao menos com uma mensagem de texto curta
 
-- **create_page(slug, description)**: Cria uma página web. Cada usuário tem direito a 1 criação por hora. O tool controla isso — apenas chame e aguarde o retorno.
+- **create_page(slug, description, source_url?)**: Cria uma página web. Se o usuário passar uma URL externa, use source_url para clonar e modificar — o sistema baixa o HTML original e aplica as mudanças da description. Sem source_url, gera do zero. Cada usuário tem direito a 1 criação por hora.
 - **read_page(slug)**: Lê o HTML de uma página existente. Use antes de update_page para ver o que há lá.
+- **get_page_info(slug)**: Retorna o histórico do que foi feito num site (criação, edições, quem pediu). Use SEMPRE que alguém perguntar "o que você fez nesse site", "como foi feito", "que mudanças teve" — não invente, consulte.
 - **update_page(slug, instruction)**: Modifica uma página existente. REGRA OBRIGATÓRIA: o usuário PRECISA fornecer o link completo do site na mensagem (ex: "muda esse site laurinha.asktome.com.br/meu-jogo"). Se pedir "muda meu site" sem passar o link, NÃO chame update_page — responda: "me manda o link do site que quer modificar" e se tiver o site dele no contexto [Site registrado], mencione esse link. Se não for dono do site informado, o sistema cria uma cópia personalizada automaticamente.
 - NUNCA use a palavra "slug" com usuários. Use "link", "endereço" ou "nome do site".
 - **REGRA ABSOLUTA DE LINKS**: TODOS os sites ficam em https://laurinha.asktome.com.br/nome-do-site. NUNCA invente outro domínio (render.com, vercel.app, netlify, github.io, etc). Se não souber o link exato, não invente — diga que o sistema vai mandar quando ficar pronto.
+
+- **QUANDO O PEDIDO PRECISA DE BACKEND**: create_page e update_page só fazem FRONTEND (HTML/CSS/JS que roda no navegador). Coisas que PRECISAM de backend real: banco de dados que salva entre dispositivos, login/cadastro de verdade, salvar dados que outras pessoas veem, API, placar compartilhado, formulário que armazena respostas. Dados que ficam só no navegador de quem acessa (localStorage) o frontend resolve sozinho.
+  - Se o pedido precisa de backend de verdade E o modo dev está DESLIGADO: NÃO crie o site (não gaste o cooldown da pessoa). Avise: "isso precisa de backend e o modo de programação tá desligado. peça pro Neto ativar com !!dev on que aí eu faço completo". Só prossiga criando se a pessoa disser que quer mesmo assim (aí faz só o frontend com localStorage e avisa que os dados ficam só no aparelho dela).
+  - Se o modo dev está LIGADO: use o fluxo de backend (create_backend_project + write_file) e conecte o frontend nele.
 
 - **send_audio**: Envia mensagem de voz em vez de texto. Use com EXTREMA raridade — só em momentos muito especiais (zoeira cirúrgica, surpresa, impacto máximo). Nunca use para respostas corriqueiras. Máx 300 caracteres, sem emojis. Quando o usuário com ID 145045491597432@c.us (Neto, o dono) pedir explicitamente um áudio — mande.${XINGAMENTOS_EXTRA}`;
 
@@ -120,7 +126,22 @@ ERROS FATAIS que quebram o projeto:
 2. create_backend_project('nome') → cria estrutura
 3. write_file('nome/index.js', código) → o sistema avisa se detectar erros de padrão
 4. get_project_status('nome') → confirma sintaxe. Se syntax_ok=false, corrija e repita
-5. Só diga "pronto" depois que get_project_status retornar syntax_ok=true
+5. create_page para o frontend que consome a API do backend
+6. Só diga "pronto" depois que TUDO (backend + frontend) estiver criado e testado
+
+**REGRA CRÍTICA — NÃO ANUNCIE, FAÇA:** Quando um projeto tem várias etapas (backend + frontend), execute TODAS as chamadas de tools de uma vez, em sequência, sem parar. NUNCA responda "agora vou criar o frontend" e pare — isso deixa o trabalho pela metade. Continue chamando tools até o projeto estar 100% completo. A primeira mensagem de texto ("ok, criando") é a ÚNICA narração permitida antes de terminar tudo.
+
+**REGRA CRÍTICA — CONTRATO DE API (frontend e backend DEVEM bater EXATAMENTE):** O maior erro é criar frontend e backend com rotas/formatos diferentes, gerando 404 e "Cannot POST". Para evitar:
+1. ANTES de escrever o frontend, DECIDA a lista exata de rotas (método + caminho + body + resposta). Ex:
+   - POST /criar  body {nome} → retorna {codigo}
+   - GET /:codigo → retorna o grupo
+2. Escreva o BACKEND com EXATAMENTE essas rotas.
+3. Escreva o FRONTEND chamando EXATAMENTE essas mesmas rotas (mesmo método, mesmo caminho, mesmos campos).
+4. CUIDADO com detalhes que causam 404:
+   - Caminho: se o frontend faz POST em "/" então o backend precisa de router.post("/"). Se faz "/criar", o backend precisa de "/criar". Tem que ser idêntico.
+   - Singular vs plural: "/materias" no front = "/materias" no back (não "/materia").
+   - Formato da resposta: se o frontend faz "const grupo = await res.json()" e usa grupo.codigo, o backend deve retornar o objeto CRU (res.json(grupo)), NÃO envelopado (res.json({ok, grupo})).
+5. Se for EDITAR um projeto que já existe e der erro de rota: use read_file no backend E no frontend, compare as rotas dos dois, e alinhe. Quase sempre o conserto é fazer o backend ter a rota que o frontend já chama.
 
 **Autenticação com token — padrão obrigatório quando precisar de login:**
 \`\`\`js
@@ -262,8 +283,8 @@ async function reflectMemory(
 }
 
 export interface AITextResponse { type: 'text'; text: string }
-export interface AIStickerResponse { type: 'sticker'; data: Buffer }
-export interface AITextAndStickerResponse { type: 'text+sticker'; text: string; data: Buffer }
+export interface AIStickerResponse { type: 'sticker'; data: Buffer; mediaFileId: number }
+export interface AITextAndStickerResponse { type: 'text+sticker'; text: string; data: Buffer; mediaFileId: number }
 export interface AIAudioResponse { type: 'audio'; data: Buffer; text: string }
 export interface AISilentResponse { type: 'silent' }
 export type AIResult = AITextResponse | AIStickerResponse | AITextAndStickerResponse | AIAudioResponse | AISilentResponse;
@@ -311,11 +332,13 @@ export async function processWithAI(
     : '';
 
   const devMode = isDevModeActive();
+  const stickerKnowledge = stickerKnowledgePrompt();
 
   const systemWithContext =
     SYSTEM_PROMPT +
     (devMode ? DEV_MODE_PROMPT : '') +
-    `\n[Agora: ${now} | Contexto: ${current.isGroup ? 'grupo' : 'privado'}]` +
+    stickerKnowledge +
+    `\n[Agora: ${now} | Contexto: ${current.isGroup ? 'grupo' : 'privado'} | Modo dev (backend): ${devMode ? 'LIGADO' : 'DESLIGADO'}]` +
     siteContext +
     `\n\n## Memória de ${current.userName}\n${memory}`;
 
@@ -389,11 +412,14 @@ export async function processWithAI(
   }
 
   let pendingSticker: Buffer | null = null;
+  let pendingStickerFileId = -1;
   let pendingAudio: Buffer | null = null;
   let pendingAudioText = '';
   let didSearch = false;
   let pendingSearchUrls: string[] = [];
   let pendingPageUrl: string | null = null;
+
+  let didUseCodeTool = false;
 
   // Tool calling loop
   while (response!.choices[0]?.finish_reason === 'tool_calls') {
@@ -409,6 +435,7 @@ export async function processWithAI(
         ? await executeCodeTool(call.function.name, input)
         : await executeTool(call.function.name, input, ctx);
 
+      if (CODE_TOOL_NAMES.has(call.function.name)) didUseCodeTool = true;
       if (call.function.name === 'web_search') didSearch = true;
 
       // Captura URL de página criada/atualizada
@@ -419,6 +446,7 @@ export async function processWithAI(
 
       if (result.type === 'sticker') {
         pendingSticker = (result as StickerToolResult).data;
+        pendingStickerFileId = (result as StickerToolResult).mediaFileId;
         messages.push({ role: 'tool', tool_call_id: call.id, content: 'ok' });
       } else if (result.type === 'audio') {
         pendingAudio = (result as AudioToolResult).data;
@@ -438,6 +466,50 @@ export async function processWithAI(
   }
 
   let raw = response!.choices[0]?.message?.content ?? '';
+
+  // Detecta "promessa não cumprida": a IA anunciou que vai continuar (criar frontend,
+  // próximo passo, etc.) mas parou de chamar tools. Força a continuação até 3x.
+  const CONTINUATION_RE = /\b(agora vou|vou (criar|fazer|montar|gerar|começar)|em seguida|próximo passo|proximo passo|já já|ja ja|deixa eu (criar|fazer)|partindo pro|vamos (pro|para o)|falta (só |so |o |a ))\b/i;
+  let continuationTries = 0;
+  while (didUseCodeTool && CONTINUATION_RE.test(raw) && continuationTries < 3) {
+    continuationTries++;
+    console.log(`[ai] promessa não cumprida detectada (tentativa ${continuationTries}): "${raw.slice(0, 80)}"`);
+    messages.push({ role: 'assistant', content: raw });
+    messages.push({ role: 'user', content: '[sistema] Você anunciou que ia continuar mas parou. NÃO anuncie o que vai fazer — FAÇA agora chamando os tools necessários (write_file, create_page, get_project_status, etc) até terminar TUDO. Só responda texto final quando o projeto estiver 100% pronto e testado.' });
+
+    try {
+      response = await chatWithProvider(currentProvider, messages, callParams);
+    } catch (err) {
+      console.error(`[ai] continuation re-query failed: ${(err as Error).message}`);
+      break;
+    }
+
+    // Reprocessa o loop de tools caso a IA volte a chamar
+    while (response!.choices[0]?.finish_reason === 'tool_calls') {
+      const toolCalls = response.choices[0].message.tool_calls;
+      if (!toolCalls?.length) break;
+      messages.push({ role: 'assistant', content: response!.choices[0].message.content, tool_calls: toolCalls });
+      for (const call of toolCalls) {
+        if (call.type !== 'function') continue;
+        const input = JSON.parse(call.function.arguments) as Record<string, unknown>;
+        const result = CODE_TOOL_NAMES.has(call.function.name)
+          ? await executeCodeTool(call.function.name, input)
+          : await executeTool(call.function.name, input, ctx);
+        if (['create_page', 'update_page'].includes(call.function.name) && result.type === 'text') {
+          const urlMatch = result.text.match(/https?:\/\/\S+/);
+          if (urlMatch) pendingPageUrl = urlMatch[0];
+        }
+        messages.push({ role: 'tool', tool_call_id: call.id, content: result.type === 'text' ? result.text : 'ok' });
+      }
+      try {
+        response = await chatWithProvider(currentProvider, messages, callParams);
+      } catch (err) {
+        console.error(`[ai] continuation tool loop failed: ${(err as Error).message}`);
+        break;
+      }
+    }
+    raw = response!.choices[0]?.message?.content ?? '';
+  }
 
   // Detecta tool calls escritas como texto
   const textToolMatch = raw.match(/web_search\(["']([^"']+)["']\)/i);
@@ -492,7 +564,7 @@ export async function processWithAI(
 
   if (isRefusal(text)) {
     console.log(`[ai] refusal detected, silencing: "${text.substring(0, 60)}"`);
-    return pendingSticker ? { type: 'sticker', data: pendingSticker } : { type: 'silent' };
+    return pendingSticker ? { type: 'sticker', data: pendingSticker, mediaFileId: pendingStickerFileId } : { type: 'silent' };
   }
 
   // Reflexão de memória + incremento de interações — fire-and-forget
@@ -508,7 +580,7 @@ export async function processWithAI(
 
   if (pendingSticker) {
     const stickerText = (text || '') + urlSuffix;
-    return { type: 'text+sticker', text: stickerText, data: pendingSticker };
+    return { type: 'text+sticker', text: stickerText, data: pendingSticker, mediaFileId: pendingStickerFileId };
   }
 
   // Garante que a URL da página criada aparece na resposta final

@@ -1,6 +1,6 @@
 import type { ChatCompletionTool } from 'openai/resources/chat';
 import { upsertUser } from '../db/users.repository';
-import { getUserStickers, getStickerData, getRandomStickerData } from '../db/catalog.repository';
+import { getUserStickers, getStickerData, getRandomStickerData, getRandomStickerWithId } from '../db/catalog.repository';
 import { executeMemoryTool } from '../memory/tools';
 import { webSearchWithUrls } from './search';
 import { publishOutbound } from '../bus/redis';
@@ -9,9 +9,62 @@ import { textToSpeech } from '../media/tts.service';
 import { writePage, readPage } from '../media/pages.service';
 import { buildPageHTML } from './page-builder';
 import { config } from '../config';
+import { teachSticker, forgetSticker } from './sticker-knowledge';
+import { logPageAction, getPageHistory } from './page-history';
 
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
+
+// ─── Validação de URL para clonagem ───────────────────────────────────────────
+
+const BLOCKED_KEYWORDS = [
+  // Adulto / pornografia
+  'porn', 'xxx', 'sex', 'nude', 'naked', 'adult', 'nsfw', 'hentai', 'onlyfans',
+  'xvideos', 'xnxx', 'xhamster', 'pornhub', 'redtube', 'youporn', 'brazzers',
+  'lesbians', 'milf', 'fetish', 'escorts', 'webcam', 'camgirl', 'stripper',
+  // Apostas / cassino
+  'casino', 'poker', 'slots', 'apostas', 'betonline', 'betano', '1xbet',
+  // Phishing / scam comuns
+  'free-money', 'earn-cash', 'click-here-win', 'crypto-giveaway',
+  // Drogas
+  'cocaine', 'heroin', 'methamphetamine', 'cannabis-shop', 'buy-weed',
+];
+
+const BLOCKED_TLDS = ['.xxx', '.adult', '.sex', '.porn'];
+
+function validateCloneUrl(rawUrl: string): { ok: boolean; reason?: string } {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return { ok: false, reason: 'URL inválida' };
+  }
+
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    return { ok: false, reason: 'só URLs http/https são permitidas' };
+  }
+
+  const fullUrl = rawUrl.toLowerCase();
+  const hostname = parsed.hostname.toLowerCase();
+
+  // Verifica TLDs bloqueados
+  for (const tld of BLOCKED_TLDS) {
+    if (hostname.endsWith(tld)) {
+      return { ok: false, reason: 'domínio bloqueado' };
+    }
+  }
+
+  // Verifica keywords na URL inteira
+  for (const kw of BLOCKED_KEYWORDS) {
+    if (fullUrl.includes(kw)) {
+      return { ok: false, reason: 'conteúdo não permitido' };
+    }
+  }
+
+  return { ok: true };
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 
 const PAGE_CREATE_COOLDOWN_MS = 60 * 60 * 1000;
 const PAGE_UPDATE_COOLDOWN_MS = 10 * 60 * 1000;
@@ -20,6 +73,29 @@ export const pageCreateCooldowns = new Map<string, number>();
 export const pageUpdateCooldowns = new Map<string, number>();
 export const userPageSlug = new Map<string, string>();
 const buildsInProgress = new Set<string>();
+
+function injectCloneBadge(html: string, originalUrl: string): string {
+  const badge = `
+<!-- badge de origem — injetado automaticamente em páginas clonadas -->
+<style>
+#__clone-badge{position:fixed;bottom:18px;right:18px;z-index:99999;display:flex;align-items:center;gap:0;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border-radius:999px;padding:7px 10px;cursor:pointer;text-decoration:none;color:rgba(255,255,255,.85);font-family:-apple-system,'Segoe UI',sans-serif;font-size:11px;font-weight:500;letter-spacing:.02em;border:1px solid rgba(255,255,255,.12);box-shadow:0 2px 12px rgba(0,0,0,.25);overflow:hidden;max-width:32px;transition:max-width .35s cubic-bezier(.4,0,.2,1),background .2s,padding .35s cubic-bezier(.4,0,.2,1);white-space:nowrap}
+#__clone-badge:hover{max-width:200px;background:rgba(0,0,0,.75);padding:7px 14px}
+#__clone-badge svg{flex-shrink:0;opacity:.75;transition:opacity .2s}
+#__clone-badge:hover svg{opacity:1}
+#__clone-badge span{overflow:hidden;max-width:0;opacity:0;transition:max-width .35s cubic-bezier(.4,0,.2,1),opacity .2s .1s,margin .35s;margin-left:0}
+#__clone-badge:hover span{max-width:160px;opacity:1;margin-left:6px}
+</style>
+<a id="__clone-badge" href="${originalUrl}" target="_blank" rel="noopener noreferrer" title="Ver página original">
+<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+<span>Ver original</span>
+</a>`;
+
+  // Injeta antes do </body>; se não tiver </body>, adiciona no final
+  if (html.includes('</body>')) {
+    return html.replace('</body>', `${badge}\n</body>`);
+  }
+  return html + badge;
+}
 
 // Persiste mapeamento userId→slug em disco
 const SLUGS_FILE = join(process.env.PAGES_DIR ?? '/home/lourival/Documentos/LaurinhaTTT/public/pages', '.user-slugs.json');
@@ -72,8 +148,37 @@ export const stickerTools: ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'send_random_sticker',
-      description: 'Envia uma figurinha aleatória do acervo. Use quando quiser mandar uma figurinha espontaneamente, sem que o usuário pediu uma específica.',
+      description: 'Envia uma figurinha ALEATÓRIA do acervo. Use só como ÚLTIMO RECURSO — quando nenhuma das figurinhas conhecidas (listadas no contexto) se encaixa no momento.',
       parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'teach_sticker',
+      description: 'Aprende o significado de uma figurinha. Chame quando o usuário ensinar o que uma figurinha significa (ex: "essa é boa pra drama") ou quando você enviou uma e o usuário explicou o que ela representa. Use o ID numérico da figurinha.',
+      parameters: {
+        type: 'object',
+        properties: {
+          sticker_id: { type: 'number', description: 'ID numérico da figurinha (ex: 42). Visível em [enviou figurinha #42] no histórico.' },
+          description: { type: 'string', description: 'O que essa figurinha representa e quando usar. Ex: "gato chorando - usar em situações de drama, tristeza exagerada, perda"' },
+        },
+        required: ['sticker_id', 'description'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'forget_sticker',
+      description: 'Remove o conhecimento sobre uma figurinha. Use quando a descrição estiver errada.',
+      parameters: {
+        type: 'object',
+        properties: {
+          sticker_id: { type: 'number', description: 'ID da figurinha a esquecer' },
+        },
+        required: ['sticker_id'],
+      },
     },
   },
   {
@@ -160,13 +265,28 @@ export const webTools: ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
-      name: 'create_page',
-      description: 'Cria uma página web pública a partir de uma descrição e retorna o link. Use para jogos, rankings, formulários, visualizações, qualquer coisa visual/interativa. Descreva o que quer — um builder dedicado gera o HTML com mais tokens.',
+      name: 'get_page_info',
+      description: 'Retorna o histórico do que foi feito num site (criação, edições, clones). Use quando o usuário perguntar "o que você fez nesse site", "como foi feito", "quais mudanças teve" etc.',
       parameters: {
         type: 'object',
         properties: {
-          slug: { type: 'string', description: 'Nome curto que vai na URL (ex: "ranking-do-grupo", "jogo-da-forca"). Só letras minúsculas, números e hifens. É a parte depois de laurinha.asktome.com.br/' },
-          description: { type: 'string', description: 'Descrição detalhada do que a página deve ser/fazer. Quanto mais detalhes, melhor o resultado.' },
+          slug: { type: 'string', description: 'Nome do site na URL (ex: para laurinha.asktome.com.br/roleta-humanits, o slug é "roleta-humanits")' },
+        },
+        required: ['slug'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'create_page',
+      description: 'Cria uma página web pública. Se o usuário passar uma URL externa, use source_url para clonar e modificar aquela página. Sem source_url, gera do zero.',
+      parameters: {
+        type: 'object',
+        properties: {
+          slug: { type: 'string', description: 'Nome curto que vai na URL. Só letras minúsculas, números e hifens.' },
+          description: { type: 'string', description: 'O que criar ou modificar. Se clonando, descreva as mudanças em relação ao original.' },
+          source_url: { type: 'string', description: 'URL externa para clonar (opcional). Ex: "https://exemplo.com". O sistema baixa o HTML e usa como base para aplicar as modificações da description.' },
         },
         required: ['slug', 'description'],
       },
@@ -264,9 +384,22 @@ export async function executeTool(
 
   // Sticker tools
   if (name === 'send_random_sticker') {
-    const data = await getRandomStickerData();
-    if (!data) return { type: 'text', text: 'Sem figurinhas no acervo ainda.' };
-    return { type: 'sticker', mediaFileId: -1, data };
+    const result = await getRandomStickerWithId();
+    if (!result) return { type: 'text', text: 'Sem figurinhas no acervo ainda.' };
+    return { type: 'sticker', mediaFileId: result.id, data: result.data };
+  }
+
+  if (name === 'teach_sticker') {
+    const { sticker_id, description } = input as { sticker_id: number; description: string };
+    const addedBy = ctx?.displayName ?? 'alguém';
+    teachSticker(sticker_id, description, addedBy);
+    return { type: 'text', text: `aprendi: #${sticker_id} → "${description}"` };
+  }
+
+  if (name === 'forget_sticker') {
+    const { sticker_id } = input as { sticker_id: number };
+    const removed = forgetSticker(sticker_id);
+    return { type: 'text', text: removed ? `esqueci a figurinha #${sticker_id}` : `não conhecia #${sticker_id}` };
   }
 
   if (name === 'get_user_stickers') {
@@ -304,6 +437,14 @@ export async function executeTool(
     return { type: 'text', text: result.output };
   }
 
+  // Histórico do que foi feito num site (não precisa de ctx)
+  if (name === 'get_page_info') {
+    const { slug } = input as { slug: string };
+    const history = getPageHistory(slug);
+    if (!history) return { type: 'text', text: `não tenho registro do que foi feito em "${slug}" (talvez tenha sido criado antes do log existir)` };
+    return { type: 'text', text: `Histórico de "${slug}":\n\n${history}` };
+  }
+
   // Web page tools
   if ((name === 'create_page' || name === 'update_page' || name === 'read_page') && ctx) {
     const isOwner = config.ownerPlatformIds.includes(ctx.platformId);
@@ -320,7 +461,7 @@ export async function executeTool(
     }
 
     if (name === 'create_page') {
-      const { slug, description } = input as { slug: string; description: string };
+      const { slug, description, source_url } = input as { slug: string; description: string; source_url?: string };
       if (!slug || !description) return { type: 'text', text: 'create_page: slug e description são obrigatórios' };
 
       // Build já em andamento pra esse slug?
@@ -351,13 +492,50 @@ export async function executeTool(
 
       (async () => {
         try {
-          console.log(`[pages] gerando HTML (background): "${description.slice(0, 80)}"`);
-          const html = await buildPageHTML(description);
+          // Se tem source_url, valida e baixa o HTML original para usar como base
+          let sourceHtml: string | undefined;
+          if (source_url) {
+            const urlCheck = validateCloneUrl(source_url);
+            if (!urlCheck.ok) {
+              console.warn(`[pages] URL bloqueada: ${source_url} — ${urlCheck.reason}`);
+              await publishOutbound({ chatId, platform, content: { type: 'text', text: `nao posso clonar esse site (${urlCheck.reason})` } });
+              return;
+            }
+            try {
+              console.log(`[pages] baixando HTML de: ${source_url}`);
+              const controller = new AbortController();
+              const timeout = setTimeout(() => controller.abort(), 10_000);
+              const res = await fetch(source_url, {
+                signal: controller.signal,
+                headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LaurinhaBot/1.0)' },
+              });
+              clearTimeout(timeout);
+              const raw = await res.text();
+              // Limita para não explodir o contexto do page-builder
+              sourceHtml = raw.slice(0, 80_000);
+              console.log(`[pages] HTML baixado: ${raw.length} chars de ${source_url}`);
+            } catch (fetchErr) {
+              console.error('[pages] erro ao baixar source_url:', (fetchErr as Error).message);
+              await publishOutbound({ chatId, platform, content: { type: 'text', text: `nao consegui acessar ${source_url}, tenta com outro link` } });
+              return;
+            }
+          }
+
+          console.log(`[pages] gerando HTML (background): "${description.slice(0, 80)}"${source_url ? ' (clonando)' : ''}`);
+          let html = await buildPageHTML(description, sourceHtml);
+          if (source_url) html = injectCloneBadge(html, source_url);
           const url = writePage(slug, html);
           // Salva dono mesmo para owner
           userPageSlug.set(userId, slug);
           saveUserSlugs();
           console.log(`[pages] criada: ${url}`);
+          logPageAction({
+            slug,
+            action: source_url ? 'clone' : 'criação',
+            by: ctx.displayName,
+            description,
+            sourceUrl: source_url,
+          });
           await publishOutbound({ chatId, platform, content: { type: 'text', text: `pronto, acessa aqui: ${url}` } });
         } catch (err) {
           console.error('[pages] erro ao criar:', (err as Error).message);
@@ -420,6 +598,7 @@ export async function executeTool(
             userPageSlug.set(userId, forkSlug);
             saveUserSlugs();
             console.log(`[pages] fork criado: ${url}`);
+            logPageAction({ slug: forkSlug, action: 'fork', by: ctx.displayName, description: `fork de "${slug}": ${instruction}` });
             await publishOutbound({ chatId, platform, content: { type: 'text', text: `pronto, fiz uma versao sua com as mudancas: ${url}` } });
           } catch (err) {
             console.error('[pages] erro ao criar fork:', (err as Error).message);
@@ -452,6 +631,7 @@ export async function executeTool(
           const html = await buildPageHTML(instruction, existing);
           const url = writePage(slug, html);
           console.log(`[pages] atualizada: ${url}`);
+          logPageAction({ slug, action: 'edição', by: ctx.displayName, description: instruction });
           await publishOutbound({ chatId, platform, content: { type: 'text', text: `atualizado, acessa: ${url}` } });
         } catch (err) {
           console.error('[pages] erro ao atualizar:', (err as Error).message);

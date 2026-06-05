@@ -14,6 +14,49 @@ interface EvolutionMessageData {
   instance?: string;
 }
 
+function extractQuotedMessage(data: EvolutionMessageData): PlatformMessage['quotedMessage'] | undefined {
+  const msg = data.message ?? {};
+
+  // Verificar em extendedTextMessage.contextInfo
+  if (msg.extendedTextMessage) {
+    const ext = msg.extendedTextMessage as Record<string, unknown>;
+    const contextInfo = ext.contextInfo as Record<string, unknown>;
+    if (contextInfo?.quotedMessage) {
+      const quoted = contextInfo.quotedMessage as Record<string, unknown>;
+      const quotedMsg = quoted.message as Record<string, unknown>;
+
+      let quotedType: ContentType = 'text';
+      let quotedText: string | undefined;
+
+      if (quotedMsg?.conversation) {
+        quotedText = quotedMsg.conversation as string;
+      } else if (quotedMsg?.extendedTextMessage) {
+        const ext2 = quotedMsg.extendedTextMessage as Record<string, unknown>;
+        quotedText = ext2.text as string;
+      } else if (quotedMsg?.imageMessage) {
+        quotedType = 'image';
+      } else if (quotedMsg?.videoMessage) {
+        quotedType = 'video';
+      } else if (quotedMsg?.stickerMessage) {
+        quotedType = 'sticker';
+      } else if (quotedMsg?.documentMessage) {
+        quotedType = 'document';
+      }
+
+      const stanzaId = contextInfo.stanzaId as string | undefined;
+      if (stanzaId) {
+        return {
+          id: stanzaId,
+          type: quotedType,
+          text: quotedText,
+        };
+      }
+    }
+  }
+
+  return undefined;
+}
+
 function extractContent(data: EvolutionMessageData): {
   type: ContentType;
   text?: string;
@@ -104,7 +147,9 @@ export function normalizeEvolutionMessage(data: EvolutionMessageData): PlatformM
   const isGroup = data.key.remoteJid.endsWith('@g.us');
   const userId = isGroup ? (data.key.participant ?? data.key.remoteJid) : data.key.remoteJid;
 
-  return {
+  const quotedMessage = extractQuotedMessage(data);
+
+  const message: PlatformMessage = {
     id: data.key.id,
     platform: 'whatsapp',
     chatId: data.key.remoteJid,
@@ -116,4 +161,10 @@ export function normalizeEvolutionMessage(data: EvolutionMessageData): PlatformM
     timestamp: (data.messageTimestamp ?? Date.now() / 1000) * 1000,
     raw: data,
   };
+
+  if (quotedMessage) {
+    message.quotedMessage = quotedMessage;
+  }
+
+  return message;
 }

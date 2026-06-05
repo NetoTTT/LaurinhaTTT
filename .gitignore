@@ -90,3 +90,4 @@ dump.rdb
 # Memory files (user data)
 data/memory/
 *.memory
+test-clone-badge.html

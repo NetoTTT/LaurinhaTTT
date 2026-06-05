@@ -58,3 +58,19 @@ export async function getRandomStickerData(): Promise<Buffer | null> {
   );
   return rows[0]?.data ?? null;
 }
+
+export async function getRandomStickerWithId(): Promise<{ id: number; data: Buffer } | null> {
+  const { rows } = await pool.query<{ id: number; data: Buffer }>(
+    'SELECT id, data FROM media_files ORDER BY RANDOM() LIMIT 1',
+  );
+  return rows[0] ?? null;
+}
+
+export async function getStickerIdByData(data: Buffer): Promise<number | null> {
+  const hash = createHash('sha256').update(data).digest('hex');
+  const { rows } = await pool.query<{ id: number }>(
+    'SELECT id FROM media_files WHERE hash = $1 LIMIT 1',
+    [hash],
+  );
+  return rows[0]?.id ?? null;
+}
